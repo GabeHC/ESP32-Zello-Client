@@ -1,0 +1,40 @@
+{
+    "build": {
+      "core": "esp32",
+      "extra_flags": "-DBOARD_HAS_PSRAM -mfix-esp32-psram-cache-issue",
+      "f_cpu": "240000000L",
+      "f_flash": "40000000L",
+      "flash_mode": "dio",
+      "mcu": "esp32",
+      "variant": "esp32"
+    },
+    "connectivity": [
+      "wifi",
+      "bluetooth",
+      "adc",
+      "dac",
+      "i2s"
+    ],
+    "debug": {
+      "openocd_target": "esp32",
+      "tools": {
+        "uart": {
+          "require_debug_port": true,
+          "default": true,
+          "args": "-b 115200"
+        }
+      }
+    },
+    "frameworks": ["arduino", "espidf"],
+    "name": "AI-Thinker ESP32 Audio Kit",
+    "upload": {
+      "flash_size": "4MB",
+      "maximum_ram_size": 327680,
+      "maximum_size": 4194304,
+      "require_upload_port": true,
+      "speed": 115200
+    },
+    "url": "https://www.ai-thinker.com/pro_view-19.html",
+    "vendor": "AI-Thinker"
+  }
+  

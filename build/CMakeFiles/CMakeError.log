@@ -1,0 +1,42 @@
+Determining if the C compiler works failed with the following output:
+Change Dir: C:/Users/Gabe/Documents/PlatformIO/Projects/Zello-Client/build/CMakeFiles/CMakeTmp
+
+Run Build Command(s):C:/Ninja/ninja.exe cmTC_6cdbd && [1/2] Building C object CMakeFiles/cmTC_6cdbd.dir/testCCompiler.c.obj
+[2/2] Linking C executable cmTC_6cdbd.exe
+FAILED: cmTC_6cdbd.exe 
+cmd.exe /C "cd . && C:\Users\Gabe\.espressif\tools\xtensa-esp32-elf\esp-2019r2-8.2.0\xtensa-esp32-elf\bin\xtensa-esp32-elf-gcc.exe    CMakeFiles/cmTC_6cdbd.dir/testCCompiler.c.obj  -o cmTC_6cdbd.exe -Wl,--out-implib,libcmTC_6cdbd.dll.a -Wl,--major-image-version,0,--minor-image-version,0   && cd ."
+c:/users/gabe/.espressif/tools/xtensa-esp32-elf/esp-2019r2-8.2.0/xtensa-esp32-elf/bin/../lib/gcc/xtensa-esp32-elf/8.2.0/../../../../xtensa-esp32-elf/bin/ld.exe: unrecognized option '--major-image-version'
+c:/users/gabe/.espressif/tools/xtensa-esp32-elf/esp-2019r2-8.2.0/xtensa-esp32-elf/bin/../lib/gcc/xtensa-esp32-elf/8.2.0/../../../../xtensa-esp32-elf/bin/ld.exe: use the --help option for usage information
+collect2.exe: error: ld returned 1 exit status
+ninja: build stopped: subcommand failed.
+
+
+
+Determining if the C compiler works failed with the following output:
+Change Dir: C:/Users/Gabe/Documents/PlatformIO/Projects/Zello-Client/build/CMakeFiles/CMakeTmp
+
+Run Build Command(s):C:/Ninja/ninja.exe cmTC_7e4f9 && [1/2] Building C object CMakeFiles/cmTC_7e4f9.dir/testCCompiler.c.obj
+[2/2] Linking C executable cmTC_7e4f9.exe
+FAILED: cmTC_7e4f9.exe 
+cmd.exe /C "cd . && C:\Users\Gabe\.espressif\tools\xtensa-esp32-elf\esp-2019r2-8.2.0\xtensa-esp32-elf\bin\xtensa-esp32-elf-gcc.exe    CMakeFiles/cmTC_7e4f9.dir/testCCompiler.c.obj  -o cmTC_7e4f9.exe -Wl,--out-implib,libcmTC_7e4f9.dll.a -Wl,--major-image-version,0,--minor-image-version,0   && cd ."
+c:/users/gabe/.espressif/tools/xtensa-esp32-elf/esp-2019r2-8.2.0/xtensa-esp32-elf/bin/../lib/gcc/xtensa-esp32-elf/8.2.0/../../../../xtensa-esp32-elf/bin/ld.exe: unrecognized option '--major-image-version'
+c:/users/gabe/.espressif/tools/xtensa-esp32-elf/esp-2019r2-8.2.0/xtensa-esp32-elf/bin/../lib/gcc/xtensa-esp32-elf/8.2.0/../../../../xtensa-esp32-elf/bin/ld.exe: use the --help option for usage information
+collect2.exe: error: ld returned 1 exit status
+ninja: build stopped: subcommand failed.
+
+
+
+Determining if the C compiler works failed with the following output:
+Change Dir: C:/Users/Gabe/Documents/PlatformIO/Projects/Zello-Client/build/CMakeFiles/CMakeTmp
+
+Run Build Command(s):C:/Ninja/ninja.exe cmTC_0d3ff && [1/2] Building C object CMakeFiles/cmTC_0d3ff.dir/testCCompiler.c.obj
+[2/2] Linking C executable cmTC_0d3ff.exe
+FAILED: cmTC_0d3ff.exe 
+cmd.exe /C "cd . && C:\Users\Gabe\.espressif\tools\xtensa-esp32-elf\esp-2019r2-8.2.0\xtensa-esp32-elf\bin\xtensa-esp32-elf-gcc.exe    CMakeFiles/cmTC_0d3ff.dir/testCCompiler.c.obj  -o cmTC_0d3ff.exe -Wl,--out-implib,libcmTC_0d3ff.dll.a -Wl,--major-image-version,0,--minor-image-version,0   && cd ."
+c:/users/gabe/.espressif/tools/xtensa-esp32-elf/esp-2019r2-8.2.0/xtensa-esp32-elf/bin/../lib/gcc/xtensa-esp32-elf/8.2.0/../../../../xtensa-esp32-elf/bin/ld.exe: unrecognized option '--major-image-version'
+c:/users/gabe/.espressif/tools/xtensa-esp32-elf/esp-2019r2-8.2.0/xtensa-esp32-elf/bin/../lib/gcc/xtensa-esp32-elf/8.2.0/../../../../xtensa-esp32-elf/bin/ld.exe: use the --help option for usage information
+collect2.exe: error: ld returned 1 exit status
+ninja: build stopped: subcommand failed.
+
+
+
