@@ -8,9 +8,9 @@
 #include <AudioGeneratorOpus.h>
 #include "AC101.h"
 #include "opus_handler.h"
-#include "AudioFileSourceBuffer.h" // Include the new header file
-#include <WebServer.h> // Include the WebServer library
-#include <Update.h>  // Add this for OTA functionality
+#include "AudioFileSourceBuffer.h"
+#include <WebServer.h>
+#include <Update.h>
 
 #define OPUS_BUFFER_SIZE 8192
 #define MIN_BUFFER_SIZE 1024
@@ -33,64 +33,6 @@ static uint8_t volume = 5;
 const uint8_t volume_step = 2;
 
 using namespace websockets;
-
-const char* updateHTML = R"(
-<!DOCTYPE html>
-<html>
-<head>
-    <title>ESP32 OTA Update</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        body { font-family: Arial; margin: 20px; }
-        .progress { width: 100%; background-color: #f0f0f0; padding: 3px; border-radius: 3px; box-shadow: inset 0 1px 3px rgba(0, 0, 0, .2); }
-        .progress-bar { width: 0%; height: 20px; background-color: #4CAF50; border-radius: 3px; transition: width 500ms; }
-        .button { background-color: #4CAF50; border: none; color: white; padding: 15px 32px; text-align: center; display: inline-block; font-size: 16px; margin: 4px 2px; cursor: pointer; }
-    </style>
-</head>
-<body>
-    <h2>ESP32 Firmware Update</h2>
-    <div id="upload-status"></div>
-    <form method='POST' action='#' enctype='multipart/form-data' id='upload_form'>
-        <input type='file' name='update' accept='.bin'>
-        <input type='submit' value='Update Firmware' class='button'>
-    </form>
-    <div class="progress">
-        <div class="progress-bar" id="prg"></div>
-    </div>
-    <script>
-        var form = document.getElementById('upload_form');
-        var progressBar = document.getElementById('prg');
-        var statusDiv = document.getElementById('upload-status');
-        
-        form.onsubmit = function(e) {
-            e.preventDefault();
-            var data = new FormData(form);
-            var xhr = new XMLHttpRequest();
-            xhr.open('POST', '/update', true);
-            
-            xhr.upload.onprogress = function(e) {
-                if (e.lengthComputable) {
-                    var percent = (e.loaded / e.total) * 100;
-                    progressBar.style.width = percent + '%';
-                }
-            };
-            
-            xhr.onreadystatechange = function() {
-                if (xhr.readyState === 4) {
-                    if (xhr.status === 200) {
-                        statusDiv.innerHTML = 'Update Success! Rebooting...';
-                    } else {
-                        statusDiv.innerHTML = 'Update Failed!';
-                    }
-                }
-            };
-            
-            xhr.send(data);
-        };
-    </script>
-</body>
-</html>
-)";
 
 WebServer server(8080);
 
@@ -199,6 +141,18 @@ void DumpAudioFileSourceBufferState() {
         Serial.print("  First byte of opusDataBuffer: ");
         Serial.println(opusDataBuffer[0], HEX);
     }
+}
+
+// Add this function and call it in setup() after SPIFFS.begin()
+void listFiles() {
+    Serial.println("\nSPIFFS files:");
+    File root = SPIFFS.open("/");
+    File file = root.openNextFile();
+    while(file) {
+        Serial.printf("- %s, size: %d bytes\n", file.name(), file.size());
+        file = root.openNextFile();
+    }
+    Serial.println("");
 }
 
 // Then your existing processOpusPlayback() function follows
@@ -394,19 +348,22 @@ void readCredentials() {
 void setupOTAWebServer() {
     server.on("/", HTTP_GET, []() {
         Serial.println("[OTA] Index page requested");
-        server.sendHeader("Connection", "close");
-        server.send(200, "text/html", updateHTML);
-    });
-
-    server.on("/debug", HTTP_GET, []() {
-        String debug = "Debug Info:\n";
-        debug += "Free Heap: " + String(ESP.getFreeHeap()) + "\n";
-        debug += "Total Heap: " + String(ESP.getHeapSize()) + "\n";
-        debug += "Flash Size: " + String(ESP.getFlashChipSize()) + "\n";
-        debug += "Free Sketch Space: " + String(ESP.getFreeSketchSpace()) + "\n";
-        debug += "WiFi RSSI: " + String(WiFi.RSSI()) + "\n";
-        debug += "Uptime: " + String(millis()/1000) + "s\n";
-        server.send(200, "text/plain", debug);
+        if (!SPIFFS.exists("/ota_update.html")) {
+            Serial.println("OTA update file not found!");
+            server.send(404, "text/plain", "OTA update file not found!");
+            return;
+        }
+        
+        File file = SPIFFS.open("/ota_update.html", "r");
+        if (!file) {
+            Serial.println("Failed to open OTA update file");
+            server.send(500, "text/plain", "Failed to open OTA update file");
+            return;
+        }
+        
+        server.streamFile(file, "text/html");
+        file.close();
+        Serial.println("OTA page served successfully");
     });
 
     server.on("/update", HTTP_POST, []() {
@@ -449,6 +406,10 @@ void setup() {
         Serial.println("Failed to mount SPIFFS");
         return;
     }
+    listFiles();  // Add this line to see what files are actually in SPIFFS
+
+    // List files in SPIFFS
+    listFiles();
 
     // Read credentials from SPIFFS
     readCredentials();
