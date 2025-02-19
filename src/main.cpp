@@ -8,9 +8,10 @@
 #include <AudioGeneratorOpus.h>
 #include "AC101.h"
 #include "opus_handler.h"
-#include "AudioFileSourceBuffer.h"
-#include <WebServer.h>
-#include <Update.h>
+#include "AudioFileSourceBuffer.h" // Include the new header file
+#include <WebServer.h> // Include the WebServer library
+#include <Update.h>  // Add this for OTA functionality
+#include <mbedtls/base64.h> // Add this include for base64 decoding
 
 #define OPUS_BUFFER_SIZE 8192
 #define MIN_BUFFER_SIZE 1024
@@ -29,28 +30,98 @@
 #define PIN_VOL_UP (18)    // KEY 5
 #define PIN_VOL_DOWN (5)   // KEY 6
 
+#define DETAILED_PACKET_COUNT 5 // Add this declaration
+
 static uint8_t volume = 5;
 const uint8_t volume_step = 2;
 
 using namespace websockets;
 
-WebServer server(8080);
+const char* updateHTML = R"(
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ESP32 OTA Update</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body { font-family: Arial; margin: 20px; }
+        .progress { width: 100%; background-color: #f0f0f0; padding: 3px; border-radius: 3px; box-shadow: inset 0 1px 3px rgba(0, 0, 0, .2); }
+        .progress-bar { width: 0%; height: 20px; background-color: #4CAF50; border-radius: 3px; transition: width 500ms; }
+        .button { background-color: #4CAF50; border: none; color: white; padding: 15px 32px; text-align: center; display: inline-block; font-size: 16px; margin: 4px 2px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <h2>ESP32 Firmware Update</h2>
+    <div id="upload-status"></div>
+    <form method='POST' action='#' enctype='multipart/form-data' id='upload_form'>
+        <input type='file' name='update' accept='.bin'>
+        <input type='submit' value='Update Firmware' class='button'>
+    </form>
+    <div class="progress">
+        <div class="progress-bar" id="prg"></div>
+    </div>
+    <script>
+        var form = document.getElementById('upload_form');
+        var progressBar = document.getElementById('prg');
+        var statusDiv = document.getElementById('upload-status');
+        
+        form.onsubmit = function(e) {
+            e.preventDefault();
+            var data = new FormData(form);
+            var xhr = new XMLHttpRequest();
+            xhr.open('POST', '/update', true);
+            
+            xhr.upload.onprogress = function(e) {
+                if (e.lengthComputable) {
+                    var percent = (e.loaded / e.total) * 100;
+                    progressBar.style.width = percent + '%';
+                }
+            };
+            
+            xhr.onreadystatechange = function() {
+                if (xhr.readyState === 4) {
+                    if (xhr.status === 200) {
+                        statusDiv.innerHTML = 'Update Success! Rebooting...';
+                    } else {
+                        statusDiv.innerHTML = 'Update Failed!';
+                    }
+                }
+            };
+            
+            xhr.send(data);
+        };
+    </script>
+</body>
+</html>
+)";
 
-// Add near the top of the file, after includes but before other declarations
-// Remove these lines
-// CircularBuffer<uint8_t, OPUS_BUFFER_SIZE> opusBufferCB;
-// AudioGeneratorOpus* opus = nullptr;
-// AudioFileSourceBuffer* fileSource = nullptr;
+// Forward declarations and structures (add at the top after includes)
+class AC101;
+class AudioOutputI2S;
+class OpusHandler;
+class AudioFileSourceBuffer;
+class WebServer;
 
-// Add this declaration
-OpusHandler* opusHandler = nullptr;
+// Structure definitions
+struct OpusConfig {
+    uint16_t sampleRate;
+    uint8_t framesPerPacket;  // Fix: removed typo uint88_t
+    uint8_t frameSizeMs;
+};
 
+struct OpusPacket {
+    const uint8_t* data;
+    size_t length;
+    uint8_t frameCount;    // Should be 6
+    uint8_t frameDuration; // Should be 20ms
+};
+
+// Global variables
+AC101 ac101;
 AudioOutputI2S* outI2S = nullptr;
+OpusHandler* opusHandler = nullptr;
 AudioFileSourceBuffer* fileSource = nullptr;
-
-bool isValidAudioStream = false;
-int binaryPacketCount = 0;
-const int DETAILED_PACKET_COUNT = 4;
+WebServer server(8080);
 
 // Add global variables for dynamic buffer
 uint8_t* opusDataBuffer = nullptr;
@@ -61,6 +132,10 @@ unsigned long streamStartTime = 0;
 unsigned long streamDuration = 0;
 size_t totalBytesReceived = 0;
 int totalPacketsReceived = 0;
+
+// Add these with other global variables
+bool isValidAudioStream = false;
+int binaryPacketCount = 0;
 
 // Websocket and Zello-related variables
 WebsocketsClient client;
@@ -81,14 +156,9 @@ void onMessageCallback(WebsocketsMessage message);
 void onEventsCallback(WebsocketsEvent event, String data);
 void readCredentials();
 void setupOTAWebServer();  // Forward declaration
-
-// Add these helper functions at the top of the file
-struct OpusPacket {
-    const uint8_t* data;
-    size_t length;
-    uint8_t frameCount;    // Should be 6
-    uint8_t frameDuration; // Should be 20ms
-};
+void processOpusPlayback();
+void DumpAudioFileSourceBufferState();
+OpusPacket findNextOpusPacket(const uint8_t* data, size_t len);
 
 // New function to validate and extract OPUS packet
 OpusPacket findNextOpusPacket(const uint8_t* data, size_t len) {
@@ -143,18 +213,6 @@ void DumpAudioFileSourceBufferState() {
     }
 }
 
-// Add this function and call it in setup() after SPIFFS.begin()
-void listFiles() {
-    Serial.println("\nSPIFFS files:");
-    File root = SPIFFS.open("/");
-    File file = root.openNextFile();
-    while(file) {
-        Serial.printf("- %s, size: %d bytes\n", file.name(), file.size());
-        file = root.openNextFile();
-    }
-    Serial.println("");
-}
-
 // Then your existing processOpusPlayback() function follows
 void processOpusPlayback() {
     if (!opusHandler || !isValidAudioStream) return;
@@ -172,107 +230,165 @@ void processOpusPlayback() {
     }
 }
 
-// Update the binary message handler
+// New function to print hex and char representation of data
+void printHexAndChar(const uint8_t* data, size_t len, const char* label) {
+    Serial.printf("\n=== %s (%d bytes) ===\n", label, len);
+    Serial.print("HEX: ");
+    for (size_t i = 0; i < len; i++) {
+        Serial.printf("%02X ", data[i]);
+    }
+    Serial.print("\nCHR: ");
+    for (size_t i = 0; i < len; i++) {
+        if (data[i] >= 32 && data[i] <= 126) {
+            Serial.printf(" %c ", data[i]);
+        } else {
+            Serial.print(" . ");
+        }
+    }
+    Serial.println("\n==================\n");
+}
+
+// Modify onMessageCallback for binary messages
 void onMessageCallback(WebsocketsMessage message) {
     if (message.isBinary()) {
-        if (!isValidAudioStream) return;
-
         size_t msgLen = message.length();
-        const uint8_t* data = (const uint8_t*)message.data().c_str();
         
-        // Skip first 8 bytes of WebSocket framing
-        const uint8_t* opusData = data + 8;
-        size_t opusLen = msgLen - 8;
+        // Create a byte array to store the message
+        uint8_t rawData[msgLen];
+        memcpy(rawData, message.c_str(), msgLen);
 
-        // Debug first packet extensively
+        // Print raw data immediately before any processing
         if (binaryPacketCount < DETAILED_PACKET_COUNT) {
-            Serial.printf("\n=== Binary Packet %d ===\n", binaryPacketCount);
-            Serial.printf("Raw message length: %d\n", msgLen);
-            Serial.print("WebSocket header: ");
-            for (int i = 0; i < 8; i++) {
-                Serial.printf("%02X ", data[i]);
+            Serial.printf("\n=== Raw Binary Packet %d of %d ===\n", 
+                binaryPacketCount + 1, DETAILED_PACKET_COUNT);
+            Serial.printf("Raw Length: %u bytes\n", msgLen);
+            
+            // Print first 32 bytes in hex
+            Serial.print("Raw Data: ");
+            for (size_t i = 0; i < min(msgLen, (size_t)32); i++) {
+                Serial.printf("%02X ", rawData[i]);
+                if (i == 8) Serial.print("| "); // Separator after header
             }
             Serial.println();
-            Serial.print("OPUS data: ");
+        }
+
+        // Validate packet type (should be 0x01 for audio)
+        if (rawData[0] != 0x01) {
+            Serial.printf("Invalid packet type: 0x%02X\n", rawData[0]);
+            binaryPacketCount++;
+            return;
+        }
+
+        // Extract header information for audio processing
+        uint32_t streamId = (rawData[1] << 24) | (rawData[2] << 16) | 
+                           (rawData[3] << 8) | rawData[4];
+        uint32_t packetId = (rawData[5] << 24) | (rawData[6] << 16) | 
+                           (rawData[7] << 8) | rawData[8];
+
+        // Get Opus data
+        const uint8_t* opusData = rawData + 9;
+        size_t opusLen = msgLen - 9;
+
+        // Debug first few packets
+        if (binaryPacketCount < DETAILED_PACKET_COUNT) {
+            Serial.printf("\nAudio Packet %d:\n", binaryPacketCount);
+            Serial.printf("Stream ID: %u\n", streamId);
+            Serial.printf("Packet ID: %u\n", packetId);
+            Serial.printf("Opus Length: %u\n", opusLen);
+            Serial.print("Opus data: ");
             for (int i = 0; i < min(16, (int)opusLen); i++) {
                 Serial.printf("%02X ", opusData[i]);
             }
             Serial.println();
         }
 
-        // First packet: initialize buffer
+        // Process the Opus data
         if (binaryPacketCount == 0) {
+            // First packet handling
             if (opusDataBuffer) {
                 free(opusDataBuffer);
                 opusDataBuffer = nullptr;
             }
-            
-            // Allocate new buffer and copy OPUS data
-            opusDataBuffer = (uint8_t*)malloc(opusLen);
+            opusDataBuffer = (uint8_t*)malloc(OPUS_BUFFER_SIZE);  // Use fixed size buffer
             if (opusDataBuffer) {
                 memcpy(opusDataBuffer, opusData, opusLen);
                 opusDataLen = opusLen;
             }
         } else {
-            // Calculate new size needed
-            size_t newSize = opusDataLen + opusLen;
-            
-            if (opusDataBuffer) {
-                uint8_t* newBuffer = (uint8_t*)malloc(newSize);
-                if (newBuffer) {
-                    memcpy(newBuffer, opusDataBuffer, opusDataLen);
-                    memcpy(newBuffer + opusDataLen, opusData, opusLen);
-                    free(opusDataBuffer);
-                    opusDataBuffer = newBuffer;
-                    opusDataLen = newSize;
-                }
-            }
-        }
-
-        if (binaryPacketCount < DETAILED_PACKET_COUNT) {
-            Serial.printf("Total buffer size: %d bytes\n", opusDataLen);
-            if (opusDataBuffer) {
-                Serial.print("Buffer starts with: ");
-                for (int i = 0; i < min(16, (int)opusDataLen); i++) {
-                    Serial.printf("%02X ", opusDataBuffer[i]);
-                }
-                Serial.println();
+            // Subsequent packets handling
+            if (opusDataBuffer && (opusDataLen + opusLen) <= OPUS_BUFFER_SIZE) {
+                memcpy(opusDataBuffer + opusDataLen, opusData, opusLen);
+                opusDataLen += opusLen;
             }
         }
 
         binaryPacketCount++;
         totalBytesReceived += opusLen;
         totalPacketsReceived++;
+
     } else {
         String msg = message.data();
         
+        // Print full message for stream start/stop
         if (msg.indexOf("\"command\":\"on_stream_start\"") >= 0) {
-            // Reset everything
+            Serial.println("\n=== Stream Start Message ===");
+            Serial.println(msg);
+            Serial.println("===========================\n");
+            // Extract codec_header
+            int headerStart = msg.indexOf("\"codec_header\":\"");
+            if (headerStart >= 0) {
+                headerStart += 15;
+                int headerEnd = msg.indexOf("\"", headerStart);
+                if (headerEnd > headerStart) {
+                    String codecHeader = msg.substring(headerStart, headerEnd);
+                    Serial.printf("Codec Header: %s\n", codecHeader.c_str());
+                    
+                    // Parse base64 codec header
+                    size_t decodedLen;
+                    uint8_t decoded[4];
+                    mbedtls_base64_decode(decoded, 4, &decodedLen, 
+                        (uint8_t*)codecHeader.c_str(), codecHeader.length());
+                    
+                    if (decodedLen == 4) {
+                        OpusConfig config;
+                        config.sampleRate = decoded[0] | (decoded[1] << 8);
+                        config.framesPerPacket = decoded[2];
+                        config.frameSizeMs = decoded[3];
+                        
+                        Serial.printf("Opus Config: %dHz, %d frames/packet, %dms/frame\n",
+                            config.sampleRate, config.framesPerPacket, config.frameSizeMs);
+                            
+                        // Configure audio hardware
+                        AC101::I2sSampleRate_t sampleRate;
+                        switch (config.sampleRate) {
+                            case 48000:
+                                sampleRate = AC101::SAMPLE_RATE_48000;
+                                break;
+                            case 44100:
+                                sampleRate = AC101::SAMPLE_RATE_44100;
+                                break;
+                            case 16000:
+                                sampleRate = AC101::SAMPLE_RATE_16000;
+                                break;
+                            default:
+                                Serial.printf("Unsupported sample rate: %d\n", config.sampleRate);
+                                sampleRate = AC101::SAMPLE_RATE_48000;
+                        }
+                        ac101.SetI2sSampleRate(sampleRate);
+                    }
+                }
+            }
+            
+            // Reset stream state
             streamStartTime = millis();
             totalBytesReceived = 0;
             totalPacketsReceived = 0;
             binaryPacketCount = 0;
             isValidAudioStream = true;
-
-            // Get packet_duration from stream start
-            int durationStart = msg.indexOf("\"packet_duration\":") + 17;
-            int durationEnd = msg.indexOf(",", durationStart);
-            if (durationStart > 17 && durationEnd > durationStart) {
-                String duration = msg.substring(durationStart, durationEnd);
-                Serial.printf("Packet duration: %s ms\n", duration.c_str());
-            }
-
-            // Reset buffer
-            if (opusDataBuffer) {
-                free(opusDataBuffer);
-                opusDataBuffer = nullptr;
-            }
-            opusDataLen = 0;
-
-            Serial.println("\n=== Stream Started ===");
-            Serial.printf("Time: %lu ms\n", streamStartTime);
-
         } else if (msg.indexOf("\"command\":\"on_stream_stop\"") >= 0) {
+            Serial.println("\n=== Stream Stop Message ===");
+            Serial.println(msg);
+            Serial.println("===========================\n");
             streamDuration = millis() - streamStartTime;
             
             Serial.println("\n=== Stream Statistics ===");
@@ -292,6 +408,19 @@ void onMessageCallback(WebsocketsMessage message) {
                 opusDataBuffer = nullptr;
                 opusDataLen = 0;
             }
+        } else if (msg.indexOf("\"command\":\"channel_status\"") >= 0) {
+            Serial.println("\n=== Channel Status ===");
+            // Extract channel name
+            int channelStart = msg.indexOf("\"channel\":\"");
+            if (channelStart >= 0) {
+                channelStart += 11;
+                int channelEnd = msg.indexOf("\"", channelStart);
+                if (channelEnd > channelStart) {
+                    String channel = msg.substring(channelStart, channelEnd);
+                    Serial.printf("Connected to channel: %s\n", channel.c_str());
+                }
+            }
+            Serial.println("===================\n");
         }
     }
 }
@@ -301,7 +430,7 @@ void onEventsCallback(WebsocketsEvent event, String data) {
         Serial.println("Connection Opened");
         // Logon message
         char logon[1024];
-        sprintf(logon, "{\"command\": \"logon\",\"seq\": 1,\"auth_token\": \"%s\",\"username\": \"bv5dj-r\",\"password\": \"gabpas\",\"channel\": \"ZELLO無線聯合網\"}", token.c_str());
+        sprintf(logon, "{\"command\": \"logon\",\"seq\": 1,\"auth_token\": \"%s\",\"username\": \"bv5dj-r\",\"password\": \"gabpas\",\"channel\": \"黑川家\"}", token.c_str());
         client.send(logon);
     } else if (event == WebsocketsEvent::ConnectionClosed) {
         Serial.println("Connection Closed");
@@ -314,6 +443,17 @@ void onEventsCallback(WebsocketsEvent event, String data) {
 }
 
 void readCredentials() {
+    // Log SPIFFS contents once during boot
+    Serial.println("\n=== SPIFFS Files ===");
+    File root = SPIFFS.open("/");
+    File file = root.openNextFile();
+    while(file) {
+        Serial.printf("- %s (%d bytes)\n", file.name(), file.size());
+        file = root.openNextFile();
+    }
+    Serial.println("===================\n");
+
+    // Rest of the credential reading code
     File wifiFile = SPIFFS.open("/wifi_credentials.ini", "r");
     if (!wifiFile) {
         Serial.println("Failed to open wifi_credentials.ini");
@@ -348,22 +488,19 @@ void readCredentials() {
 void setupOTAWebServer() {
     server.on("/", HTTP_GET, []() {
         Serial.println("[OTA] Index page requested");
-        if (!SPIFFS.exists("/ota_update.html")) {
-            Serial.println("OTA update file not found!");
-            server.send(404, "text/plain", "OTA update file not found!");
-            return;
-        }
-        
-        File file = SPIFFS.open("/ota_update.html", "r");
-        if (!file) {
-            Serial.println("Failed to open OTA update file");
-            server.send(500, "text/plain", "Failed to open OTA update file");
-            return;
-        }
-        
-        server.streamFile(file, "text/html");
-        file.close();
-        Serial.println("OTA page served successfully");
+        server.sendHeader("Connection", "close");
+        server.send(200, "text/html", updateHTML);
+    });
+
+    server.on("/debug", HTTP_GET, []() {
+        String debug = "Debug Info:\n";
+        debug += "Free Heap: " + String(ESP.getFreeHeap()) + "\n";
+        debug += "Total Heap: " + String(ESP.getHeapSize()) + "\n";
+        debug += "Flash Size: " + String(ESP.getFlashChipSize()) + "\n";
+        debug += "Free Sketch Space: " + String(ESP.getFreeSketchSpace()) + "\n";
+        debug += "WiFi RSSI: " + String(WiFi.RSSI()) + "\n";
+        debug += "Uptime: " + String(millis()/1000) + "s\n";
+        server.send(200, "text/plain", debug);
     });
 
     server.on("/update", HTTP_POST, []() {
@@ -406,10 +543,6 @@ void setup() {
         Serial.println("Failed to mount SPIFFS");
         return;
     }
-    listFiles();  // Add this line to see what files are actually in SPIFFS
-
-    // List files in SPIFFS
-    listFiles();
 
     // Read credentials from SPIFFS
     readCredentials();
