@@ -68,12 +68,9 @@ This project implements a Zello client on an ESP32 (specifically tested with ESP
 - OTA (Over The Air) updates
 - Basic audio setup (I2S, AC101 codec)
 - Volume control buttons
+- OPUS audio playback 
 
 ### ❌ In Progress:
-- OPUS audio playback (Current Issue)
-  - WebSocket packets received
-  - OPUS decoding attempted
-  - No audio output yet
 - Audio transmission (Not Started)
 
 ## Hardware
