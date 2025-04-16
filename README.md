@@ -1,8 +1,53 @@
 # ESP32 Zello Audio Client (Work In Progress)
 
-An experimental WebSocket client for Zello running on ESP32-A1S audio development board, with the goal of creating a standalone portable Zello radio gateway. 
-**⚠️ This project is under active development and not yet fully functional.**
+This project implements a Zello client on an ESP32 (specifically tested with ESP32-A1S board with AC101 codec) using the Zello Channel API over WebSockets.
 
+## Status / Features
+
+-   **WiFi Connection:** Working
+-   **WebSocket Connection (Secure):** Working
+-   **Zello Authentication:** Working
+-   **Stream Start/Stop Handling:** Working
+-   **Opus Decoding:** Working
+-   **Audio Playback (AC101/ES8388): Working**
+-   **Button Input (Volume Up/Down): Working**
+-   **OTA Updates (Web Interface): Working**
+-   **SPIFFS for Configuration:** Working (WiFi credentials, Zello API key, CA Cert)
+-   **NTP Time Sync:** Working
+
+## Hardware Requirements
+
+-   ESP32-A1S Development Board (or similar ESP32 with AC101/ES8388 audio codec)
+-   Buttons connected to GPIOs:
+    -   Play/Mute: GPIO 23
+    -   Volume Up: GPIO 18
+    -   Volume Down: GPIO 5
+-   Speaker/Headphones connected to the audio output jack.
+
+## Setup Instructions
+
+1.  **Clone Repository:** `git clone https://github.com/GabeHC/ESP32-Zello-Client.git`
+2.  **PlatformIO:** Open the cloned folder in VS Code with the PlatformIO extension installed.
+3.  **Configure SPIFFS:**
+    *   Create a `data` directory in the project root (`Zello-Client/data`).
+    *   Inside `data`, create the following files:
+        *   `wifi_credentials.ini`:
+            ```ini
+            ssid=YOUR_WIFI_SSID
+            password=YOUR_WIFI_PASSWORD
+            ```
+        *   `zello-api.key`: Paste your Zello Channel API key into this file (just the key, no extra text).
+        *   `zello-io.crt`: Place the Zello CA certificate file here (downloadable or provided).
+    *   Use the PlatformIO "Upload Filesystem Image" task to upload the contents of the `data` directory to SPIFFS.
+4.  **Build and Upload:** Use PlatformIO to build and upload the firmware to the ESP32 via USB for the first time.
+5.  **Subsequent Updates:** Access the web interface at `http://<ESP32_IP_ADDRESS>` (port 80) to upload new firmware via OTA.
+
+## Audio Packet Format (Zello WebSocket)
+   Byte 0: Packet type (0x01 for audio)
+   Bytes 1-4: Stream ID (32-bit big-endian)
+   Bytes 5-8: Packet ID (32-bit big-endian)
+   Bytes 9+: OPUS encoded audio data
+   
 ## Project Vision
 
 🎯 **Final Goal**: Standalone Zello Radio Gateway
@@ -67,30 +112,21 @@ An experimental WebSocket client for Zello running on ESP32-A1S audio developmen
 - A2DP sink and source profiles
 - HFP for headset support
 
-## Setup Instructions
-
-1. Clone repository
-2. Run `setup-project.bat`
-3. Configure WiFi credentials in `wifi_config.txt`
-4. First upload via USB
-5. Subsequent updates via OTA
-
 ## References & Resources
 
 📚 **Documentation**
-- [ESP32-A1S Audio Kit Schematic](https://docs.ai-thinker.com/_media/esp32/docs/esp32-a1s_v2.3_specification.pdf)
-- [AC101 Codec Driver](https://github.com/Yveaux/AC101)
-- [ESP8266Audio Library](https://github.com/earlephilhower/ESP8266Audio)
-- [Opus Audio Codec](https://opus-codec.org/docs/)
-- [Zello SDK Documentation](https://github.com/zelloptt/zello-channel-api/blob/master/API.md)
+-   [ESP32-A1S Audio Kit Schematic](https://docs.ai-thinker.com/_media/esp32/docs/esp32-a1s_v2.3_specification.pdf)
+-   [AC101 Codec Driver (Reference)](https://github.com/Yveaux/AC101)
+-   [arduino-audio-tools Library](https://github.com/pschatzmann/arduino-audio-tools) (Used for AudioBoardStream)
+-   [Opus Audio Codec](https://opus-codec.org/docs/)
+-   [Zello Channel API Documentation](https://github.com/zelloptt/zello-channel-api/blob/master/API.md)
 
 ## Legal Notice
 
 ⚠️ **Disclaimer**:
-- This is a DIY educational project for personal use only
-- Not affiliated with Zello Inc.
-- Project designed for learning purposes
-- Zello® is a trademark of Zello Inc.
+-   This is a DIY educational project for personal use only.
+-   Not affiliated with Zello Inc.
+-   Use responsibly and ensure compliance with Zello's terms of service.
 
 ## License
 
