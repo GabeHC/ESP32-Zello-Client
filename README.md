@@ -1,130 +1,81 @@
-# ESP32 Zello Audio Client (Work In Progress)
+# ESP32 Zello Client
 
-This project implements a Zello client on an ESP32 (specifically tested with ESP32-A1S board with AC101 codec) using the Zello Channel API over WebSockets.
+An ESP32-based hardware client for Zello Push-to-Talk service that can connect to Zello channels and play incoming audio through a speaker.
 
-## Status / Features
+## Features
 
--   **WiFi Connection:** Working
--   **WebSocket Connection (Secure):** Working
--   **Zello Authentication:** Working
--   **Stream Start/Stop Handling:** Working
--   **Opus Decoding:** Working
--   **Audio Playback (AC101/ES8388): Working**
--   **Button Input (Volume Up/Down): Working**
--   **OTA Updates (Web Interface): Working**
--   **SPIFFS for Configuration:** Working (WiFi credentials, Zello API key, CA Cert)
--   **NTP Time Sync:** Working
+- Connects to Zello channels via WebSocket API
+- Decodes Opus audio streams in real-time
+- Responsive web dashboard for device control
+- Volume and speaker controls via hardware buttons or web interface
+- Audio enhancement options with multiple profiles
+- OTA (Over-The-Air) firmware updates
+- Web-based configuration for WiFi and Zello settings
+- UTF-8 compatible for international usernames and channel names
+
+## Recent Updates
+
+### Version 1.0.3 (April 2025)
+- Added web-based configuration for Zello account settings
+- Added web-based configuration for WiFi settings
+- Improved UTF-8 support for international character sets
+- Fixed issue with audio enhancement toggle
+- Added detailed status information to the dashboard
+- Added auto-reconnect functionality for WebSocket
 
 ## Hardware Requirements
 
--   ESP32-A1S Development Board (or similar ESP32 with AC101/ES8388 audio codec)
--   Buttons connected to GPIOs:
-    -   Play/Mute: GPIO 23
-    -   Volume Up: GPIO 18
-    -   Volume Down: GPIO 5
--   Speaker/Headphones connected to the audio output jack.
+- ESP32 development board
+- AC101 audio codec or compatible I2S DAC
+- Speaker with amplifier
+- Physical buttons for control (optional)
 
-## Setup Instructions
+## Configuration
 
-1.  **Clone Repository:** `git clone https://github.com/GabeHC/ESP32-Zello-Client.git`
-2.  **PlatformIO:** Open the cloned folder in VS Code with the PlatformIO extension installed.
-3.  **Configure SPIFFS:**
-    *   Create a `data` directory in the project root (`Zello-Client/data`).
-    *   Inside `data`, create the following files:
-        *   `wifi_credentials.ini`:
-            ```ini
-            ssid=YOUR_WIFI_SSID
-            password=YOUR_WIFI_PASSWORD
-            ```
-        *   `zello-api.key`: Paste your Zello Channel API key into this file (just the key, no extra text).
-        *   `zello-io.crt`: Place the Zello CA certificate file here (downloadable or provided).
-    *   Use the PlatformIO "Upload Filesystem Image" task to upload the contents of the `data` directory to SPIFFS.
-4.  **Build and Upload:** Use PlatformIO to build and upload the firmware to the ESP32 via USB for the first time.
-5.  **Subsequent Updates:** Access the web interface at `http://<ESP32_IP_ADDRESS>` (port 80) to upload new firmware via OTA.
+### Web Interface
 
-## Audio Packet Format (Zello WebSocket)
-   Byte 0: Packet type (0x01 for audio)
-   Bytes 1-4: Stream ID (32-bit big-endian)
-   Bytes 5-8: Packet ID (32-bit big-endian)
-   Bytes 9+: OPUS encoded audio data
-   
-## Project Vision
+The device provides a web interface accessible via the IP address shown during boot. The web interface allows you to:
 
-🎯 **Final Goal**: Standalone Zello Radio Gateway
-- Compact handheld form factor
-- Color LCD display for channel/status
-- Touch wheel interface for navigation
-- LiPo battery powered
-- USB-C charging/data interface
-- Custom designed enclosure
-- No phone/computer required
+1. View system status and diagnostics
+2. Control volume and speaker
+3. Toggle audio enhancement
+4. Configure WiFi credentials
+5. Configure Zello account and channel settings
+6. Perform OTA firmware updates
 
-## Current Status
+### WiFi Configuration
 
-### ✅ Working:
-- WebSocket connection to Zello server
-- HTTPS certificate validation
-- WiFi credentials management via SPIFFS
-- OTA (Over The Air) updates
-- Basic audio setup (I2S, AC101 codec)
-- Volume control buttons
-- OPUS audio playback 
+Access the WiFi configuration page by clicking the "WiFi Settings" button on the dashboard. This allows you to set:
+- WiFi SSID
+- WiFi password
 
-### ❌ In Progress:
-- Audio transmission (Not Started)
+The device will automatically reboot after saving WiFi settings to apply the changes.
 
-## Hardware
+### Zello Configuration
 
-### Current Development Hardware:
-- ESP32-A1S Audio Kit
-- Built-in AC101 codec
-- Onboard speaker outputs
-- Volume control buttons
-- 3.5mm headphone jack
+Access the Zello configuration page by clicking the "Zello Settings" button on the dashboard. This allows you to set:
+- Zello username
+- Zello password
+- Zello channel name
+- Zello API token
 
-### Planned Final Hardware:
-- ESP32-S3 main board
-- 2.8" Color LCD Display
-- Capacitive wheel controller
-- 2000mAh LiPo battery
-- USB-C port for charging/data
-- Stereo DAC and amplifier
-- Custom designed enclosure
-- Built-in speaker
-- 3.5mm TRRS audio jack for:
-  - Stereo audio output
-  - Mono microphone input
-  - PTT button support
+The device will automatically reconnect to Zello after saving these settings.
 
-## Connectivity
+## Installation
 
-### WiFi
-- Primary connection for Zello service
-- OTA firmware updates
-- Web configuration interface
+1. Clone this repository
+2. Configure your `platformio.ini` with the appropriate board and settings
+3. Create a `wifi_credentials.ini` file in the `data` folder with your credentials
+4. Create a `zello-api.key` file in the `data` folder with your Zello API token
+5. Upload the code and file system to your ESP32
 
-### Bluetooth
-- Optional wireless audio output
-- External headset/speaker support
-- A2DP sink and source profiles
-- HFP for headset support
+## File Structure
 
-## References & Resources
-
-📚 **Documentation**
--   [ESP32-A1S Audio Kit Schematic](https://docs.ai-thinker.com/_media/esp32/docs/esp32-a1s_v2.3_specification.pdf)
--   [AC101 Codec Driver (Reference)](https://github.com/Yveaux/AC101)
--   [arduino-audio-tools Library](https://github.com/pschatzmann/arduino-audio-tools) (Used for AudioBoardStream)
--   [Opus Audio Codec](https://opus-codec.org/docs/)
--   [Zello Channel API Documentation](https://github.com/zelloptt/zello-channel-api/blob/master/API.md)
-
-## Legal Notice
-
-⚠️ **Disclaimer**:
--   This is a DIY educational project for personal use only.
--   Not affiliated with Zello Inc.
--   Use responsibly and ensure compliance with Zello's terms of service.
+The following files are stored in the ESP32's SPIFFS file system:
+- `/wifi_credentials.ini` - Contains WiFi and Zello user credentials
+- `/zello-api.key` - Contains the Zello API token
+- `/zello-io.crt` - SSL certificate for secure WebSocket connection
 
 ## License
 
-MIT License - See LICENSE file
+[MIT License](LICENSE)
