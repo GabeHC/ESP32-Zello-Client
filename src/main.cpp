@@ -748,10 +748,6 @@ void setup() {
         String caCert = certFile.readString();
         certFile.close();
         
-        // Debug the certificate content
-        Serial.println("CA certificate loaded:");
-        Serial.println(caCert.substring(0, 64) + "..."); // Show first part
-        
         // Set the certificate
         client.setCACert(caCert.c_str());
         Serial.println("CA certificate set for SSL connection");
