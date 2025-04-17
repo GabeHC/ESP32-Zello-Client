@@ -6,17 +6,21 @@
 #include <WebServer.h> // Include the WebServer library
 #include <Update.h>  // Add this for OTA functionality
 #include <mbedtls/base64.h> // Add this include for base64 decoding
-#include "opus.h"
-#include "opus_defines.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_system.h"
 
-#include <AudioTools.h> 
-#include <AudioTools/AudioLibs/AudioBoardStream.h> // *** Add the 'AudioTools' directory level ***
+// Audio-tools includes for handling OPUS
+#include "AudioTools.h"
+// Include AudioBoard driver and the stream wrapper
+#include "AudioBoard.h" // Assumes this is findable by the compiler
+// Correct include path based on the example
+#include "AudioTools/AudioLibs/AudioBoardStream.h" 
+// For OPUS decoding
+#include "AudioTools/AudioCodecs/CodecOpus.h"
 
-#include <WiFiUdp.h>
-#include <NTPClient.h>
+// #include <WiFiUdp.h> // Commented out as NTP is removed
+// #include <NTPClient.h> // Already commented out
 
 // Add this function to help with UTF-8 debugging
 void printUtf8HexBytes(const char* str, const char* label) {
@@ -53,13 +57,14 @@ void printUtf8HexBytes(const char* str, const char* label) {
 
 #define FIRMWARE_VERSION "1.0.3"  // Increment version for this fix
 
+// Volume control settings (only define once)
 static uint8_t volume = 40;        // Start at ~63% volume (0-63 range)
 const uint8_t volume_step = 5;     // Larger steps for quicker adjustment
-float initialVolumeFloat = 0.63f; // Store the initial float volume set in setup
+float initialVolumeFloat = 0.63f;  // Store the initial float volume set in setup
 
 using namespace websockets;
 
-// Forward declarations and structures (add at the top after includes)
+// Forward declarations and structures
 class WebServer; // Keep this one
 
 // Structure definitions
@@ -78,7 +83,13 @@ struct OpusPacket {
 
 // Global variables
 WebServer server(80);
-AudioBoardStream audioKit(AudioKitAC101); 
+// Use AudioBoardStream wrapping the specific AudioBoard instance for AC101
+// Note: AudioKitAC101 is defined in AudioBoard.h from audio-driver library
+audio_tools::AudioBoardStream out(audio_driver::AudioKitAC101); 
+// Add Audio-tools related objects - update to use correct namespaces
+audio_tools::OpusAudioDecoder opusDecoder;
+audio_tools::EncodedAudioStream *decoderStream = nullptr; // Will connect decoder to audio output
+audio_tools::AudioInfo audioInfo;
 
 // Add these global variables near the top with other declarations
 unsigned long streamStartTime = 0;
@@ -100,14 +111,12 @@ String zelloUsername = "Gabriel Huang";  // Default value
 String zelloPassword = "22433897";      // Default value
 String zelloChannel = "ZELLO無線聯合網";   // Default value
 
-// Add these global variables
-OpusDecoder* decoder = nullptr;
-int16_t* pcmBuffer = nullptr;
-size_t pcmBufferSize = 0;
+// Replace these variables for OPUS handling
+bool decoderInitialized = false;
 
-// NTP client variables
-WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000); // UTC, update every 60s
+// NTP client variables - Commented out
+// WiFiUDP ntpUDP;
+// NTPClient timeClient(ntpUDP, "pool.ntp.org", 0, 60000); // UTC, update every 60s
 
 // Add these global variables for audio enhancement
 bool enhanceAudio = true;  // Enable audio enhancement by default
@@ -141,13 +150,12 @@ bool connectWebSocket();  // Add this missing declaration
 // Update the validateOpusPacket function
 bool validateOpusPacket(const uint8_t* data, size_t len) {
     if (len < 2) return false;
-    
+    // Debug output for first few packets
     uint8_t toc = data[0];
     uint8_t config = toc >> 3;        // First 5 bits
     uint8_t s = (toc >> 2) & 0x1;     // 1 bit
     uint8_t c = toc & 0x3;            // Last 2 bits
-    
-    // Debug output for first few packets
+
     if (binaryPacketCount < DETAILED_PACKET_COUNT) {
         Serial.printf("\nValidating OPUS packet:\n");
         Serial.printf("- TOC: 0x%02X\n", toc);
@@ -158,7 +166,7 @@ bool validateOpusPacket(const uint8_t* data, size_t len) {
         Serial.printf("- Channels: %d\n", c + 1);
         Serial.printf("- Length: %d bytes\n", len);
     }
-    
+
     // Less strict validation for Zello packets
     if (len < 8) return false;        // Too short to be valid
     if (config > 31) return false;    // Invalid configuration
@@ -190,8 +198,6 @@ void debugOpusFrame(const uint8_t* data, size_t len, int frameNum) {
     Serial.println();
 }
 
-// ...existing code...
-
 void onEventsCallback(WebsocketsEvent event, String data) {
     if (event == WebsocketsEvent::ConnectionOpened) {
         Serial.println("Connection Opened");
@@ -202,10 +208,8 @@ void onEventsCallback(WebsocketsEvent event, String data) {
                zelloUsername.c_str(),
                zelloPassword.c_str(),
                zelloChannel.c_str());
-               
         // Remove the debug printing which shows auth token and other sensitive info
         // printUtf8HexBytes(logon, "Logon message UTF-8 bytes");
-        
         client.send(logon);
     } else if (event == WebsocketsEvent::ConnectionClosed) {
         Serial.println("Connection Closed");
@@ -229,13 +233,12 @@ void readCredentials() {
     }
     Serial.println("===================\n");
 
-    // Rest of the credential reading code
     File wifiFile = SPIFFS.open("/wifi_credentials.ini", "r");
     if (!wifiFile) {
         Serial.println("Failed to open wifi_credentials.ini");
         return;
     }
-    
+
     // UTF-8 BOM handling
     if (wifiFile.available() >= 3) {
         uint8_t bom[3];
@@ -246,7 +249,7 @@ void readCredentials() {
             wifiFile.seek(0);
         }
     }
-    
+
     while (wifiFile.available()) {
         String line = wifiFile.readStringUntil('\n');
         line.trim();
@@ -283,19 +286,16 @@ void readCredentials() {
     tokenFile.close();
 }
 
-// ...existing code...
-
 void enhanceVoiceAudio(int16_t* buffer, int samples) {
     // Skip if enhancement is disabled
     if (!enhanceAudio) return;
-    
+
     static int16_t prevSample = 0;
     static int16_t prevSamples[3] = {0, 0, 0};
-    
+
     switch (enhancementProfile) {
         case 0: // No enhancement
             return;
-        
         case 1: { // Voice profile - boost high frequencies for clarity
             // Simple high-pass filter and treble boost for voice clarity
             const float highBoost = 1.5f;  // High frequency boost factor
@@ -308,7 +308,6 @@ void enhanceVoiceAudio(int16_t* buffer, int samples) {
             }
             break;
         }
-        
         case 2: { // Music profile - gentle enhancement
             // Simple presence boost (mid-high frequencies)
             const float presenceBoost = 1.2f;
@@ -327,10 +326,6 @@ void enhanceVoiceAudio(int16_t* buffer, int samples) {
     }
 }
 
-// ...remaining existing code...
-
-// Implementations of setup() and loop() functions which are required by Arduino framework
-
 // Add this function before setup()
 bool connectWebSocket() {
     if (caCertificate.length() == 0) {
@@ -344,17 +339,15 @@ bool connectWebSocket() {
         caCertificate = certFile.readString();
         certFile.close();
         Serial.println("CA certificate loaded:");
-     //   Serial.println(caCertificate.substring(0, 64) + "..."); // Show first part
+        Serial.println(caCertificate.substring(0, 64) + "..."); // Show first part
     }
-    
+
+    Serial.println("Connecting to WebSocket server...");
     // We need to set the certificate every time we connect
     client.setCACert(caCertificate.c_str());
     Serial.println("CA certificate set for SSL connection");
-    
-    // Now try to connect
-    Serial.println("Connecting to WebSocket server...");
+
     bool connected = client.connect(websocket_server);
-    
     if (!connected) {
         Serial.println("WebSocket connection failed!");
         // Check if certificate has issues
@@ -363,52 +356,56 @@ bool connectWebSocket() {
             Serial.println("ERROR: Certificate appears to be invalid. Check the format!");
         }
     }
-    
     return connected;
 }
 
 void setup() {
     Serial.begin(115200);
     delay(100);
-    Serial.println("\n\n=== Booting Zello Client (using AudioBoardStream) ===");
-    // --- STEP 1: Initialize AudioKit ---
-    Serial.println("Initializing AudioBoardStream (relying on build flags)...");
-    auto cfg = audioKit.defaultConfig(TX_MODE);
+    Serial.println("\n\n=== Booting Zello Client (using Audio-tools with AudioBoardStream) ===");
+    
+    // --- STEP 1: Initialize Audio ---
+    Serial.println("Initializing Audio...");
+    // Use the AudioBoardStream 'out' for configuration and initialization
+    auto cfg = out.defaultConfig(TX_MODE); // Use TX_MODE for output
     cfg.sample_rate = 48000;
     cfg.channels = 2;
     cfg.bits_per_sample = 16;
-    // *** Print the configuration WE ARE TRYING TO SET ***
-    Serial.println("Attempting AudioKit Config:");
+    // Print the configuration 
+    Serial.println("Attempting Audio Config:");
     Serial.printf("- Sample Rate: %d\n", cfg.sample_rate);
     Serial.printf("- Channels: %d\n", cfg.channels);
     Serial.printf("- Bits/Sample: %d\n", cfg.bits_per_sample);
-    Serial.printf("- BCLK Pin: %d\n", cfg.pin_bck);
-    Serial.printf("- WS Pin: %d\n", cfg.pin_ws);
-    Serial.printf("- DOUT Pin: %d\n", cfg.pin_data);
-    if (!audioKit.begin(cfg)) { // *** Call begin(cfg) ***
+    // Pins are handled by the underlying AudioBoard instance
+
+    // Begin the AudioBoardStream instance
+    if (!out.begin(cfg)) { 
         Serial.println("AudioBoardStream initialization FAILED! Halting.");
         while(1) { delay(1000); }
     } else {
         Serial.println("AudioBoardStream initialized successfully.");
-        // *** Store the intended initial volume ***
         initialVolumeFloat = volume / 63.0f;
-        audioKit.setVolume(initialVolumeFloat); // Set initial volume for later use
+        // Set volume using the AudioBoardStream instance
+        out.setVolume(initialVolumeFloat); 
         Serial.printf("Initial volume set to %d (%.2f)\n", volume, initialVolumeFloat);
-        Serial.println("Audio parameters set via config (48kHz, 16bit, Stereo).");
-        // *** Play a startup tone ***
+        
+        // Play a startup tone
         Serial.println("Playing startup tone...");
-        enableSpeakerAmp(true); // Enable amp for the tone
-        float toneVolume = 0.05f; // Set master volume very low for the tone
+        enableSpeakerAmp(true);  // Enable amp for the tone
+        float toneVolume = 0.05f;  // Set master volume very low for the tone
         Serial.printf("Temporarily setting master volume to %.2f for tone\n", toneVolume);
-        audioKit.setVolume(toneVolume); 
-        delay(50); // Short delay for amp and volume change
-        const int toneFrequency = 440; // A4 note
-        const int toneDurationMs = 200; // Play for 200ms
+        out.setVolume(toneVolume); 
+        delay(50);  // Short delay for amp and volume change
+        
+        // Generate tone
+        const int toneFrequency = 440;  // A4 note
+        const int toneDurationMs = 200;  // Play for 200ms
         const int sampleRate = cfg.sample_rate;
         const int numSamples = (sampleRate * toneDurationMs) / 1000;
-        const float amplitude = 0.1f; // Can keep this low (e.g., 10%)
+        const float amplitude = 0.1f;  // 10% amplitude
         int16_t toneBuffer[128 * 2];
         int samplesGenerated = 0;
+        
         while (samplesGenerated < numSamples) {
             int samplesInChunk = 0;
             for (int i = 0; i < 128 && samplesGenerated < numSamples; ++i) {
@@ -416,19 +413,22 @@ void setup() {
                 float sineValue = sin(2.0 * PI * toneFrequency * time);
                 int16_t sampleValue = (int16_t)(sineValue * 32767.0f * amplitude);
                 // Stereo output
-                toneBuffer[i * 2] = sampleValue;     // Left channel
-                toneBuffer[i * 2 + 1] = sampleValue; // Right channel
+                toneBuffer[i * 2] = sampleValue;      // Left channel
+                toneBuffer[i * 2 + 1] = sampleValue;  // Right channel
                 samplesGenerated++;
                 samplesInChunk++;
             }
-            audioKit.write((uint8_t*)toneBuffer, samplesInChunk * 2 * sizeof(int16_t));
+            // Write using the AudioBoardStream 'out'
+            out.write((uint8_t*)toneBuffer, samplesInChunk * 2 * sizeof(int16_t)); 
         }
-        delay(50); // Short delay after tone
-        enableSpeakerAmp(false); // Disable amp after tone
+        
+        delay(50);  // Short delay after tone
+        enableSpeakerAmp(false);  // Disable amp after tone
         Serial.printf("Restoring master volume to %.2f\n", initialVolumeFloat);
-        audioKit.setVolume(initialVolumeFloat); 
+        out.setVolume(initialVolumeFloat); 
         Serial.println("Startup tone finished.");
     }
+    
     // --- END OF STEP 1 ---
     // --- STEP 2: Initialize SPIFFS ---
     Serial.println("Initializing SPIFFS...");
@@ -452,7 +452,8 @@ void setup() {
     Serial.print("         IP: "); Serial.println(WiFi.localIP());
     Serial.println("========================================");
     // --- END OF STEP 3 ---
-    // Synchronize time with NTP before SSL connection
+    // Synchronize time with NTP before SSL connection - Commented out
+    /*
     Serial.print("Synchronizing time with NTP...");
     timeClient.begin();
     int ntpTries = 0;
@@ -467,14 +468,13 @@ void setup() {
     } else {
         Serial.println("Failed to sync time with NTP!");
     }
+    */
     // --- STEP 4: Setup WebSocket ---
     Serial.println("Setting up WebSocket...");
     client.onMessage(onMessageCallback);
     client.onEvent(onEventsCallback);
-    
     // Connect to WebSocket server using our new function
     connectWebSocket();
-    
     // --- END OF STEP 4 ---
     // --- STEP 5: Setup OTA and Buttons ---
     Serial.println("Setting up OTA and Buttons...");
@@ -567,53 +567,42 @@ void loop() {
     server.handleClient();
 }
 
-// Forward declarations of remaining required functions
 bool initOpusDecoder(int sampleRate) {
-    // Implementation of initOpusDecoder
-    int err;
-    // Clean up any existing decoder
-    if (decoder) {
-        opus_decoder_destroy(decoder);
-        decoder = nullptr;
+    // Log entry and sample rate
+    Serial.printf("Initializing OPUS decoder with sampleRate=%d\n", sampleRate);
+    
+    // Clean up existing decoder if any
+    if (decoderStream != nullptr) {
+        delete decoderStream;
+        decoderStream = nullptr;
     }
-    // *** DEBUG: Log entry and sample rate ***
-    Serial.printf("DEBUG: initOpusDecoder called with sampleRate=%d\n", sampleRate);
-    Serial.printf("Creating OPUS decoder for %dHz\n", sampleRate);
-    decoder = opus_decoder_create(sampleRate, CHANNELS, &err);
-    // *** DEBUG: Log decoder creation result ***
-    Serial.printf("DEBUG: opus_decoder_create returned: %d, decoder ptr: %p\n", err, decoder);
-    if (err != OPUS_OK || !decoder) {
-        Serial.printf("Failed to create decoder: %d (%s)\n", 
-            err, opus_strerror(err));
+    // Set up audio info for the decoder
+    audioInfo.sample_rate = sampleRate;
+    audioInfo.channels = 1; // Start with mono from OPUS
+    audioInfo.bits_per_sample = 16;
+    
+    // Create a new EncodedAudioStream using the AudioBoardStream 'out'
+    decoderStream = new audio_tools::EncodedAudioStream(&out, &opusDecoder); 
+    if (!decoderStream) {
+        Serial.println("Failed to create decoder stream!");
         return false;
     }
-    // Set decoder gain and bit depth
-    err = opus_decoder_ctl(decoder, OPUS_SET_GAIN(0)); // *** Set gain to 0dB (no change) ***
-    if (err != OPUS_OK) {
-        Serial.printf("Failed to set gain: %s\n", opus_strerror(err));
+    
+    // Configure the decoder - output is potentially stereo (based on AudioKit)
+    audio_tools::AudioInfo outputInfo;
+    outputInfo.sample_rate = sampleRate; 
+    outputInfo.channels = 2; // Output to stereo AudioKit
+    outputInfo.bits_per_sample = 16;
+    
+    if (!decoderStream->begin(outputInfo)) {
+        Serial.println("Failed to initialize decoder stream!");
+        delete decoderStream;
+        decoderStream = nullptr;
+        return false;
     }
-    err = opus_decoder_ctl(decoder, OPUS_SET_LSB_DEPTH(16));
-    if (err != OPUS_OK) {
-        Serial.printf("Failed to set bit depth: %s\n", opus_strerror(err));
-    }
-    // Allocate PCM buffer
-    pcmBufferSize = MAX_FRAME_SIZE * CHANNELS;
-    if (pcmBuffer) {
-        free(pcmBuffer);
-        pcmBuffer = nullptr; // *** DEBUG: Ensure pointer is nulled after free ***
-    }
-    // *** DEBUG: Log buffer allocation size ***
-    Serial.printf("DEBUG: Allocating PCM buffer (size=%d samples, %d bytes)\n", pcmBufferSize, pcmBufferSize * sizeof(int16_t));
-    pcmBuffer = (int16_t*)malloc(pcmBufferSize * sizeof(int16_t));
-    // *** DEBUG: Log buffer allocation result ***
-    Serial.printf("DEBUG: pcmBuffer malloc result: %p\n", pcmBuffer);
-    if (!pcmBuffer) {
-        Serial.println("Failed to allocate PCM buffer");
-        opus_decoder_destroy(decoder);
-        decoder = nullptr;
-        return false;  
-    }
+    
     Serial.println("OPUS decoder initialized successfully");
+    decoderInitialized = true;
     return true;
 }
 
@@ -621,7 +610,9 @@ void setVolume(uint8_t vol) {
     volume = constrain(vol, 0, 63);
     float vol_float = volume / 63.0f; // Convert to 0.0 - 1.0 range
     Serial.printf("Setting volume to %d (%.2f)\n", volume, vol_float);
-    if (!audioKit.setVolume(vol_float)) { // Check return value if available
+    
+    // Use AudioBoardStream instance to set volume instead
+    if (!out.setVolume(vol_float)) { // Check return value if available
          Serial.println("WARNING: Failed to set volume!");
     }
 }
@@ -650,9 +641,6 @@ void enableSpeakerAmp(bool enable) {
     }
 }
 
-// ...remaining existing code...
-
-// Implementation of the missing onMessageCallback function
 void onMessageCallback(WebsocketsMessage message) {
     if (message.isBinary()) {
         // Handle binary message (audio data)
@@ -688,67 +676,25 @@ void onMessageCallback(WebsocketsMessage message) {
             Serial.println();
         }
         
-        // Decode OPUS data if decoder is ready
-        if (decoder && pcmBuffer) {
-            // Check for valid packet size
-            if (opusLen < 2) {
-                Serial.println("OPUS packet too small");
-                return;
-            }
-            
-            if (opusLen > MAX_PACKET_SIZE) {
-                Serial.printf("OPUS packet too large: %d > %d\n", opusLen, MAX_PACKET_SIZE);
-                return;
-            }
-            
-            // Decode the OPUS data to PCM
-            int samples_decoded = opus_decode(decoder, opusData, opusLen, pcmBuffer, MAX_FRAME_SIZE, 0);
-            
+        // Check for valid packet size
+        if (opusLen < 2) {
+            Serial.println("OPUS packet too small");
+            return;
+        }
+        if (opusLen > MAX_PACKET_SIZE) {
+            Serial.printf("OPUS packet too large: %d > %d\n", opusLen, MAX_PACKET_SIZE);
+            return;
+        }
+        
+        // Using Audio-tools EncodedAudioStream to decode OPUS
+        if (decoderInitialized && decoderStream) {
+            size_t bytes_written = decoderStream->write(opusData, opusLen);
             // Check for decode errors
-            if (samples_decoded < 0) {
-                Serial.printf("OPUS decode error %d: %s\n", samples_decoded, opus_strerror(samples_decoded));
-                return;
-            }
-            
-            // Process decoded audio
-            if (samples_decoded > 0) {
-                // Apply audio enhancement if enabled
-                if (enhanceAudio) {
-                    enhanceVoiceAudio(pcmBuffer, samples_decoded);
-                }
-                
-                // Convert mono to stereo
-                size_t stereoBufferSize = samples_decoded * 2;
-                int16_t* stereoBuffer = (int16_t*)malloc(stereoBufferSize * sizeof(int16_t));
-                
-                if (!stereoBuffer) {
-                    Serial.println("ERROR: Failed to allocate stereoBuffer!");
-                    totalBytesReceived += opusLen;
-                    totalPacketsReceived++;
-                    binaryPacketCount++;
-                    return;
-                }
-                
-                // Create stereo samples from mono
-                for (int i = 0; i < samples_decoded; i++) {
-                    stereoBuffer[i * 2]     = pcmBuffer[i]; // Left channel
-                    stereoBuffer[i * 2 + 1] = pcmBuffer[i]; // Right channel
-                }
-                
-                // Output audio data
-                size_t bytes_to_write = stereoBufferSize * sizeof(int16_t);
-                size_t bytes_written = audioKit.write((uint8_t*)stereoBuffer, bytes_to_write);
-                
-                // Free the stereo buffer
-                free(stereoBuffer);
-                
-                // Log playback status
-                bool consumed_fully = (bytes_written == bytes_to_write);
-                if (!consumed_fully || binaryPacketCount == 0 || binaryPacketCount % 100 == 0) {
-                    Serial.printf("AudioKit Write: packet=%d, samples=%d, bytes=%d/%d, consumed=%s\n",
-                                  binaryPacketCount, samples_decoded, bytes_written, bytes_to_write,
-                                  consumed_fully ? "OK" : "PARTIAL/FAIL");
-                }
+            if (bytes_written != opusLen) {
+                Serial.printf("OPUS decode error: wrote %d of %d bytes\n", bytes_written, opusLen);
+            } else if (binaryPacketCount == 0 || binaryPacketCount % 100 == 0) {
+                Serial.printf("AudioTools decoder write: packet=%d, bytes=%d/%d\n",
+                            binaryPacketCount, bytes_written, opusLen);
             }
         }
         
@@ -759,7 +705,7 @@ void onMessageCallback(WebsocketsMessage message) {
     } else {
         // Handle text message (JSON control messages)
         String msg = message.data();
-        
+            
         // Stream start message
         if (msg.indexOf("\"command\":\"on_stream_start\"") >= 0) {
             Serial.println("\n=== Stream Start Message ===");
@@ -769,23 +715,19 @@ void onMessageCallback(WebsocketsMessage message) {
             // Extract codec header from JSON
             Serial.println("Attempting to find codec_header...");
             int headerStart = msg.indexOf("\"codec_header\":\"");
-            
             if (headerStart >= 0) {
-                headerStart += 16; // Skip past "codec_header":"
+                headerStart += 16; // Skip past "codec_header":""
                 int headerEnd = msg.indexOf("\"", headerStart);
-                
                 if (headerEnd > headerStart) {
                     String codecHeader = msg.substring(headerStart, headerEnd);
                     Serial.printf("Extracted Codec Header: [%s]\n", codecHeader.c_str());
                     
-                    // Decode base64 codec header
+                    // Decode base64 header
                     size_t decodedLen = 0;
                     uint8_t decoded[4];
                     int decode_ret = mbedtls_base64_decode(decoded, 4, &decodedLen, 
                         (const uint8_t*)codecHeader.c_str(), codecHeader.length());
-                    
                     Serial.printf("Base64 decode result: %d, decoded length: %d\n", decode_ret, decodedLen);
-                    
                     if (decode_ret == 0 && decodedLen == 4) {
                         // Parse OpusConfig
                         OpusConfig config;
@@ -796,30 +738,30 @@ void onMessageCallback(WebsocketsMessage message) {
                         Serial.printf("Opus Config: %dHz, %d frames/packet, %dms/frame\n",
                             config.sampleRate, config.framesPerPacket, config.frameSizeMs);
                         
-                        // Configure audio output
-                        auto cfg = audioKit.defaultConfig(TX_MODE);
+                        // Configure audio output using the AudioBoardStream instance
+                        auto cfg = out.defaultConfig(TX_MODE);
                         cfg.sample_rate = config.sampleRate;
                         cfg.bits_per_sample = 16;
                         cfg.channels = 2;
                         
-                        if (!audioKit.begin(cfg)) {
+                        // Re-initialize the AudioBoardStream with the new config
+                        if (!out.begin(cfg)) { 
                             Serial.println("WARNING: Failed to apply updated audio config!");
                         } else {
                             Serial.printf("Audio parameters updated (%dHz, 16bit, Stereo).\n", config.sampleRate);
                             delay(10);
                             
-                            // Set initial stream volume
+                            // Set initial stream volume using the AudioBoardStream instance
                             float streamVolume = 0.2f;
                             Serial.printf("Setting stream volume to %.2f\n", streamVolume);
-                            audioKit.setVolume(streamVolume);
+                            out.setVolume(streamVolume); 
                         }
                         
                         // Initialize Opus decoder
                         if (!initOpusDecoder(config.sampleRate)) {
-                            Serial.println("Failed to initialize Opus decoder");
+                            Serial.println("Failed to initialize Opus decoder");    
                             return;
                         }
-                        
                         // Enable amplifier
                         enableSpeakerAmp(true);
                     } else {
@@ -831,7 +773,6 @@ void onMessageCallback(WebsocketsMessage message) {
             } else {
                 Serial.println("Could not find start of codec_header string.");
             }
-            
             // Reset stream counters
             streamStartTime = millis();
             totalBytesReceived = 0;
@@ -858,29 +799,25 @@ void onMessageCallback(WebsocketsMessage message) {
             
             // Clean up resources
             isValidAudioStream = false;
-            
-            if (decoder) {
-                opus_decoder_destroy(decoder);
-                decoder = nullptr;
-            }
-            
-            if (pcmBuffer) {
-                free(pcmBuffer);
-                pcmBuffer = nullptr;
+            if (decoderStream) {
+                decoderStream->end();
+                delete decoderStream;
+                decoderStream = nullptr;
+                decoderInitialized = false;
             }
             
             // Disable amplifier
             Serial.println("Disabling speaker amplifier for stream stop...");
             enableSpeakerAmp(false);
-            
-            // Restore volume
+            // Restore volume using the AudioBoardStream instance
             Serial.printf("Restoring initial volume to %.2f\n", initialVolumeFloat);
-            audioKit.setVolume(initialVolumeFloat);
+            out.setVolume(initialVolumeFloat); 
         }
         // Channel status message
         else if (msg.indexOf("\"command\":\"channel_status\"") >= 0) {
             Serial.println("\n=== Channel Status ===");
-            
+            Serial.println(msg);
+            Serial.println("===================\n");
             // Extract channel name
             int channelStart = msg.indexOf("\"channel\":\"");
             if (channelStart >= 0) {
@@ -995,12 +932,11 @@ void setupOTAWebServer() {
         html += "<button class='btn' onclick=\"window.location.href='/config/wifi'\">WiFi Settings</button>";
         html += "<button class='btn' onclick=\"window.location.href='/config/zello'\">Zello Settings</button>";
         html += "</div>";
-        
+         
         // Auto-refresh
         html += "<p style='text-align:center;margin-top:20px;'><small>Auto-refreshing every 5 seconds</small></p>";
         html += "<script>setTimeout(function(){window.location.reload();}, 5000);</script>";
         html += "</body></html>";
-        
         server.send(200, "text/html", html);
     });
 
@@ -1076,7 +1012,6 @@ void setupOTAWebServer() {
         
         if (upload.status == UPLOAD_FILE_START) {
             Serial.printf("Update: %s\n", upload.filename.c_str());
-            
             if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
                 Update.printError(Serial);
                 return;
@@ -1096,7 +1031,7 @@ void setupOTAWebServer() {
         
         yield();
     });
-
+    
     // OTA update page
     server.on("/ota", HTTP_GET, []() {
         String html = "<!DOCTYPE html><html><head>";
@@ -1145,10 +1080,9 @@ void setupOTAWebServer() {
         html += "</script>";
         html += "<p><a href='/'>&larr; Back to Dashboard</a></p>";
         html += "</body></html>";
-        
         server.send(200, "text/html", html);
     });
-    
+
     // Add WiFi configuration page
     server.on("/config/wifi", HTTP_GET, []() {
         String html = "<!DOCTYPE html><html><head>";
@@ -1189,12 +1123,11 @@ void setupOTAWebServer() {
         html += "</div>";
         html += "<p><a href='/'>&larr; Back to Dashboard</a></p>";
         html += "</body></html>";
-        
         server.send(200, "text/html", html);
     });
-    
+
     // Handle saving WiFi configuration
-    server.on("/config/wifi/save", HTTP_POST, []() {
+    server.on("/config/wifi/save", HTTP_POST, []() { 
         bool needReboot = false;
         
         // Get form values
@@ -1238,7 +1171,7 @@ void setupOTAWebServer() {
                     else if (line.indexOf("password=") == 0) {
                         newContent += "password=" + password + "\n";
                         passwordFound = true;
-                    }
+                    } 
                     else {
                         newContent += line;
                     }
@@ -1347,15 +1280,13 @@ void setupOTAWebServer() {
         html += ")</p>";
         html += "</div>";
         
-        html += "</div>";
         html += "<p><a href='/'>&larr; Back to Dashboard</a></p>";
         html += "</body></html>";
-        
         server.send(200, "text/html", html);
     });
 
     // Handle saving Zello configuration - improved UTF-8 handling
-    server.on("/config/zello/save", HTTP_POST, []() {
+    server.on("/config/zello/save", HTTP_POST, []() { 
         bool needReconnect = false;
         
         Serial.println("Received Zello configuration update:");
@@ -1441,7 +1372,7 @@ void setupOTAWebServer() {
                     else if (line.indexOf("password_zello=") == 0) {
                         newContent += "password_zello=" + zelloPassword + "\n";
                         zelloPasswordFound = true;
-                    }
+                    } 
                     else if (line.indexOf("channel=") == 0) {
                         newContent += "channel=" + zelloChannel + "\n";
                         channelFound = true;
@@ -1495,7 +1426,7 @@ void setupOTAWebServer() {
     });
 
     // ...existing server endpoints...
-    
+
     // Start the server
     server.begin();
     Serial.println("HTTP server started");
