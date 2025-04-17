@@ -9,6 +9,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_system.h"
+#include <opus.h> // Add this include for OPUS encoding
 
 // Audio-tools includes for handling OPUS
 #include "AudioTools.h"
@@ -61,6 +62,8 @@ void printUtf8HexBytes(const char* str, const char* label) {
 static uint8_t volume = 40;        // Start at ~63% volume (0-63 range)
 const uint8_t volume_step = 5;     // Larger steps for quicker adjustment
 float initialVolumeFloat = 0.63f;  // Store the initial float volume set in setup
+
+#define PTT_PIN 36  // GPIO for PTT button
 
 using namespace websockets;
 
@@ -134,6 +137,19 @@ bool lastVolDownState = HIGH;
 // Add these global variables near the top with other globals
 String caCertificate;  // Store the CA certificate globally for reconnection attempts
 
+bool lastPTTState = HIGH;
+bool isTransmitting = false;
+
+// Add global for TX task handle
+TaskHandle_t txTaskHandle = nullptr;
+volatile bool txActive = false;
+
+// Add a global flag to track if playback is active
+bool playbackActive = false;
+
+// Add global for current stream ID (max 8 bytes, null-terminated)
+char currentStreamId[9] = {0};
+
 // Forward declarations for functions
 void readCredentials();
 void setupOTAWebServer();
@@ -146,6 +162,10 @@ void setVolume(uint8_t vol);
 void enhanceVoiceAudio(int16_t* buffer, int samples);
 void onMessageCallback(WebsocketsMessage message); 
 bool connectWebSocket();  // Add this missing declaration
+
+// Add these forward declarations to fix the error
+void startTransmission();
+void stopTransmission();
 
 // Update the validateOpusPacket function
 bool validateOpusPacket(const uint8_t* data, size_t len) {
@@ -403,6 +423,7 @@ void setup() {
         Serial.println("AudioBoardStream initialization FAILED! Halting.");
         while(1) { delay(1000); }
     } else {
+        playbackActive = true;
         Serial.println("AudioBoardStream initialized successfully.");
         initialVolumeFloat = volume / 63.0f;
         // Set volume using the AudioBoardStream instance
@@ -507,6 +528,7 @@ void setup() {
     pinMode(PIN_VOL_DOWN, INPUT_PULLUP);
     pinMode(GPIO_PA_EN, OUTPUT); // Make sure pin is OUTPUT
     enableSpeakerAmp(false);     // Start with amplifier OFF
+    pinMode(PTT_PIN, INPUT_PULLUP); // PTT button, active LOW
     // --- END OF STEP 5 ---
     Serial.println("\nSetup complete");
 }
@@ -585,6 +607,21 @@ void loop() {
     }
     // Handle OTA Web Server
     server.handleClient();
+
+    // PTT handling
+    bool currentPTTState = digitalRead(PTT_PIN);
+    if (lastPTTState == HIGH && currentPTTState == LOW) {
+        // Button pressed
+        Serial.println("PTT button pressed - Starting transmission");
+        startTransmission(); // Your function to start Zello transmission
+        isTransmitting = true;
+    } else if (lastPTTState == LOW && currentPTTState == HIGH) {
+        // Button released
+        Serial.println("PTT button released - Stopping transmission");
+        stopTransmission(); // Your function to stop Zello transmission
+        isTransmitting = false;
+    }
+    lastPTTState = currentPTTState;
 }
 
 bool initOpusDecoder(int sampleRate) {
@@ -799,6 +836,18 @@ void onMessageCallback(WebsocketsMessage message) {
             totalPacketsReceived = 0;
             binaryPacketCount = 0;
             isValidAudioStream = true;
+
+            // Extract stream_id from JSON
+            int idStart = msg.indexOf("\"stream_id\":\"");
+            if (idStart >= 0) {
+                idStart += 13;
+                int idEnd = msg.indexOf("\"", idStart);
+                if (idEnd > idStart && idEnd - idStart <= 8) {
+                    memset(currentStreamId, 0, sizeof(currentStreamId));
+                    msg.substring(idStart, idEnd).toCharArray(currentStreamId, sizeof(currentStreamId));
+                    Serial.printf("Parsed stream_id: [%s]\n", currentStreamId);
+                }
+            }
         }
         // Stream stop message
         else if (msg.indexOf("\"command\":\"on_stream_stop\"") >= 0) {
@@ -825,7 +874,7 @@ void onMessageCallback(WebsocketsMessage message) {
                 
                 // Wait a moment to allow buffered audio to play
                 // This delay prevents cutting off the last part of audio
-                const int END_STREAM_DELAY_MS = 200;  // 200ms delay to ensure audio plays out
+                const int END_STREAM_DELAY_MS = 200;  // ms delay to ensure audio plays out
                 delay(END_STREAM_DELAY_MS);
                 Serial.printf("Waited %dms for audio buffer to empty\n", END_STREAM_DELAY_MS);
             }
@@ -1464,6 +1513,115 @@ void setupOTAWebServer() {
     // Start the server
     server.begin();
     Serial.println("HTTP server started");
+}
+
+// --- PTT/Zello transmission control ---
+
+void audioTxTask(void* parameter) {
+    // Prevent starting if playback is active
+    if (playbackActive) {
+        Serial.println("ERROR: Cannot start TX while playback is active. Stop playback first.");
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    // Configure input (microphone) stream
+    audio_tools::AudioBoardStream mic(audio_driver::AudioKitAC101);
+    auto cfg = mic.defaultConfig(RX_MODE);
+    cfg.sample_rate = 16000; // Zello default is 16kHz mono
+    cfg.channels = 1;
+    cfg.bits_per_sample = 16;
+    mic.begin(cfg);
+
+    // OPUS encoder setup using libopus
+    int opusErr = 0;
+    OpusEncoder* opusEnc = opus_encoder_create(16000, 1, OPUS_APPLICATION_VOIP, &opusErr);
+    if (!opusEnc || opusErr != OPUS_OK) {
+        Serial.printf("Failed to create Opus encoder: %d\n", opusErr);
+        mic.end();
+        vTaskDelete(nullptr);
+        return;
+    }
+    opus_encoder_ctl(opusEnc, OPUS_SET_BITRATE(16000)); // 16kbps, adjust as needed
+
+    const int chunkSamples = 320; // 20ms at 16kHz
+    int16_t pcmBuffer[chunkSamples];
+    uint8_t opusBuffer[512];
+
+    // Watchdog timer workaround: periodically yield to keep system alive
+    unsigned long lastYield = millis();
+
+    while (txActive) {
+        // --- Feed the watchdog at the start of each loop iteration ---
+        vTaskDelay(1);
+        // ...existing code...
+        int bytesRead = mic.readBytes((uint8_t*)pcmBuffer, chunkSamples * sizeof(int16_t));
+        int samplesRead = bytesRead / sizeof(int16_t);
+        if (samplesRead > 0 && strlen(currentStreamId) > 0) {
+            int opusLen = opus_encode(opusEnc, pcmBuffer, samplesRead, opusBuffer, sizeof(opusBuffer));
+            if (opusLen > 0) {
+                uint8_t zelloPacket[521];
+                zelloPacket[0] = 0x00; // TX packet type
+                memset(zelloPacket + 1, 0, 8);
+                memcpy(zelloPacket + 1, currentStreamId, strlen(currentStreamId));
+                memcpy(zelloPacket + 9, opusBuffer, opusLen);
+                client.sendBinary((const char*)zelloPacket, opusLen + 9);
+            }
+        }
+        // ...existing code...
+    }
+
+    opus_encoder_destroy(opusEnc);
+    mic.end();
+    vTaskDelete(nullptr);
+}
+
+void startTransmission() {
+    if (client.available()) {
+        // Stop playback before starting TX
+        if (playbackActive) {
+            out.end();
+            playbackActive = false;
+            Serial.println("Playback stopped to allow TX (recording) to start.");
+        }
+        String startMsg = "{\"command\":\"start_stream\",\"channel\":\"" + zelloChannel + "\"}";
+        client.send(startMsg);
+        Serial.println("Sent start_stream command to Zello");
+
+        // Start TX task if not already running
+        if (!txActive) {
+            txActive = true;
+            xTaskCreatePinnedToCore(audioTxTask, "audioTxTask", 4096, nullptr, 1, &txTaskHandle, 1);
+        }
+    } else {
+        Serial.println("WebSocket not connected, cannot start transmission");
+    }
+}
+
+void stopTransmission() {
+    if (client.available()) {
+        String stopMsg = "{\"command\":\"stop_stream\",\"channel\":\"" + zelloChannel + "\"}";
+        client.send(stopMsg);
+        Serial.println("Sent stop_stream command to Zello");
+    } else {
+        Serial.println("WebSocket not connected, cannot stop transmission");
+    }
+    // Stop TX task
+    txActive = false;
+    // Optionally wait for task to finish
+    vTaskDelay(50 / portTICK_PERIOD_MS);
+
+    // Optionally, re-enable playback after TX
+    if (!playbackActive) {
+        auto cfg = out.defaultConfig(TX_MODE);
+        cfg.sample_rate = 48000;
+        cfg.channels = 2;
+        cfg.bits_per_sample = 16;
+        if (out.begin(cfg)) {
+            playbackActive = true;
+            Serial.println("Playback re-enabled after TX.");
+        }
+    }
 }
 
 // ...remaining existing code...
