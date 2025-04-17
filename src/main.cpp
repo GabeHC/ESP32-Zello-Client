@@ -198,6 +198,26 @@ void debugOpusFrame(const uint8_t* data, size_t len, int frameNum) {
     Serial.println();
 }
 
+// Add after the debugOpusFrame function
+
+// Helper function to flush audio buffer and wait for playback to complete
+bool flushAudioAndWait(audio_tools::EncodedAudioStream* stream, int maxWaitMs = 500) {
+    if (!stream) return false;
+    
+    Serial.println("Flushing audio buffer and waiting for playback...");
+    unsigned long startTime = millis();
+    
+    // First, flush any pending data
+    stream->flush();
+    
+    // Then wait a moment to ensure it plays out
+    // In a more advanced implementation, we could check a buffer status flag
+    delay(maxWaitMs);
+    
+    Serial.printf("Audio buffer flushed (waited %d ms)\n", maxWaitMs);
+    return true;
+}
+
 void onEventsCallback(WebsocketsEvent event, String data) {
     if (event == WebsocketsEvent::ConnectionOpened) {
         Serial.println("Connection Opened");
@@ -797,6 +817,20 @@ void onMessageCallback(WebsocketsMessage message) {
                         (totalPacketsReceived * 1000.0) / streamDuration);
             Serial.println("=====================\n");
             
+            // ADD THIS SECTION - Flush audio and wait before cleanup
+            Serial.println("Flushing audio buffer before ending stream...");
+            if (decoderStream) {
+                // Flush remaining audio data
+                decoderStream->flush();
+                
+                // Wait a moment to allow buffered audio to play
+                // This delay prevents cutting off the last part of audio
+                const int END_STREAM_DELAY_MS = 200;  // 200ms delay to ensure audio plays out
+                delay(END_STREAM_DELAY_MS);
+                Serial.printf("Waited %dms for audio buffer to empty\n", END_STREAM_DELAY_MS);
+            }
+            // END NEW SECTION
+            
             // Clean up resources
             isValidAudioStream = false;
             if (decoderStream) {
@@ -806,7 +840,7 @@ void onMessageCallback(WebsocketsMessage message) {
                 decoderInitialized = false;
             }
             
-            // Disable amplifier
+            // Disable amplifier only after buffer has played out
             Serial.println("Disabling speaker amplifier for stream stop...");
             enableSpeakerAmp(false);
             // Restore volume using the AudioBoardStream instance
