@@ -25,7 +25,7 @@ An ESP32-based hardware client for Zello Push-to-Talk service that can connect t
 
 ## Hardware Requirements
 
-- ESP32 development board
+- ESP32-A1S development board
 - AC101 audio codec or compatible I2S DAC
 - Speaker with amplifier
 - Physical buttons for control (optional)
@@ -79,3 +79,4 @@ The following files are stored in the ESP32's SPIFFS file system:
 ## License
 
 [MIT License](LICENSE)
+
