@@ -150,6 +150,25 @@ bool playbackActive = false;
 // Add global for current stream ID (max 8 bytes, null-terminated)
 char currentStreamId[9] = {0};
 
+// Store the token in a global heap-allocated variable to reduce stack usage
+static char* globalToken = nullptr;
+
+void setToken(const String& newToken) {
+    if (globalToken) {
+        free(globalToken);
+    }
+    globalToken = (char*)malloc(newToken.length() + 1);
+    if (globalToken) {
+        strcpy(globalToken, newToken.c_str());
+    } else {
+        Serial.println("Failed to allocate memory for token");
+    }
+}
+
+const char* getToken() {
+    return globalToken ? globalToken : "";
+}
+
 // Forward declarations for functions
 void readCredentials();
 void setupOTAWebServer();
@@ -194,6 +213,19 @@ bool validateOpusPacket(const uint8_t* data, size_t len) {
     // Instead, we'll force mono output in the decoder
     return true;
 }
+// Define the onEventsCallback function to handle WebSocket events
+void onEventsCallback(WebsocketsEvent event, String data) {
+    if (event == WebsocketsEvent::ConnectionOpened) {
+        Serial.println("Connection Opened");
+    } else if (event == WebsocketsEvent::ConnectionClosed) {
+        Serial.println("Connection Closed");
+    } else if (event == WebsocketsEvent::GotPing) {
+        Serial.println("Got Ping");
+        client.pong(); // Send pong in response to ping
+    } else if (event == WebsocketsEvent::GotPong) {
+        Serial.println("Got Pong");
+    }
+}
 
 // Add this debug function
 void debugOpusFrame(const uint8_t* data, size_t len, int frameNum) {
@@ -218,155 +250,61 @@ void debugOpusFrame(const uint8_t* data, size_t len, int frameNum) {
     Serial.println();
 }
 
-// Add after the debugOpusFrame function
+String refreshZelloToken() {
+    WiFiClientSecure client;
+    client.setInsecure(); // Use this if the server doesn't require a certificate
 
-// Helper function to flush audio buffer and wait for playback to complete
-bool flushAudioAndWait(audio_tools::EncodedAudioStream* stream, int maxWaitMs = 500) {
-    if (!stream) return false;
-    
-    Serial.println("Flushing audio buffer and waiting for playback...");
-    unsigned long startTime = millis();
-    
-    // First, flush any pending data
-    stream->flush();
-    
-    // Then wait a moment to ensure it plays out
-    // In a more advanced implementation, we could check a buffer status flag
-    delay(maxWaitMs);
-    
-    Serial.printf("Audio buffer flushed (waited %d ms)\n", maxWaitMs);
-    return true;
+    const char* tokenServer = "t30.djspot.net";
+    const char* tokenPath = "/zello/token";
+
+    Serial.println("Refreshing Zello token...");
+    if (!client.connect(tokenServer, 443)) {
+        Serial.println("Failed to connect to token server");
+        return "";
+    }
+
+    // Send HTTP GET request
+    client.print(String("GET ") + tokenPath + " HTTP/1.1\r\n" +
+                 "Host: " + tokenServer + "\r\n" +
+                 "Connection: close\r\n\r\n");
+
+    // Wait for response
+    while (client.connected() && !client.available()) {
+        delay(10);
+    }
+
+    // Read response
+    String response = "";
+    while (client.available()) {
+        response += client.readString();
+    }
+
+    // Parse JSON response
+    Serial.println("Parsing token response...");
+    int tokenStart = response.indexOf("\"token\":\"");
+    int tokenEnd = response.indexOf("\"", tokenStart + 9);
+    if (tokenStart != -1 && tokenEnd != -1) {
+        String token = response.substring(tokenStart + 9, tokenEnd);
+        // Replace token assignment with setToken to use the global heap-allocated variable
+        setToken(token);
+        Serial.println("New token received: " + String(getToken()));
+
+        // Optionally, parse the expiration time
+        int expStart = response.indexOf("\"exp\":");
+        if (expStart != -1) {
+            int expEnd = response.indexOf("}", expStart);
+            String expStr = response.substring(expStart + 6, expEnd);
+            unsigned long expTime = expStr.toInt();
+            Serial.printf("Token expiration time: %lu\n", expTime);
+        }
+
+        return token;
+    }
+
+    Serial.println("Failed to parse token from response");
+    return "";
 }
 
-void onEventsCallback(WebsocketsEvent event, String data) {
-    if (event == WebsocketsEvent::ConnectionOpened) {
-        Serial.println("Connection Opened");
-        // Logon message with UTF-8 channel name
-        char logon[1024];
-        sprintf(logon, "{\"command\": \"logon\",\"seq\": 1,\"auth_token\": \"%s\",\"username\": \"%s\",\"password\": \"%s\",\"channel\": \"%s\"}", 
-               token.c_str(), 
-               zelloUsername.c_str(),
-               zelloPassword.c_str(),
-               zelloChannel.c_str());
-        // Remove the debug printing which shows auth token and other sensitive info
-        // printUtf8HexBytes(logon, "Logon message UTF-8 bytes");
-        client.send(logon);
-    } else if (event == WebsocketsEvent::ConnectionClosed) {
-        Serial.println("Connection Closed");
-    } else if (event == WebsocketsEvent::GotPing) {
-        Serial.println("Got Ping - Sending Pong");
-        client.pong(); // This is correct - respond to ping with pong
-    } else if (event == WebsocketsEvent::GotPong) {
-        // Just log it, don't send anything back
-        Serial.println("Got Pong - Connection is active"); 
-    }
-}
-
-void readCredentials() {
-    // Log SPIFFS contents once during boot
-    Serial.println("\n=== SPIFFS Files ===");
-    File root = SPIFFS.open("/");
-    File file = root.openNextFile();
-    while(file) {
-        Serial.printf("- %s (%d bytes)\n", file.name(), file.size());
-        file = root.openNextFile();
-    }
-    Serial.println("===================\n");
-
-    File wifiFile = SPIFFS.open("/wifi_credentials.ini", "r");
-    if (!wifiFile) {
-        Serial.println("Failed to open wifi_credentials.ini");
-        return;
-    }
-
-    // UTF-8 BOM handling
-    if (wifiFile.available() >= 3) {
-        uint8_t bom[3];
-        wifiFile.read(bom, 3);
-        // Check for UTF-8 BOM (EF BB BF)
-        if (bom[0] != 0xEF || bom[1] != 0xBB || bom[2] != 0xBF) {
-            // Not a BOM, reset file position
-            wifiFile.seek(0);
-        }
-    }
-
-    while (wifiFile.available()) {
-        String line = wifiFile.readStringUntil('\n');
-        line.trim();
-        int separatorIndex = line.indexOf('=');
-        if (separatorIndex != -1) {
-            String key = line.substring(0, separatorIndex);
-            String value = line.substring(separatorIndex + 1);
-            if (key == "ssid") {
-                ssid = value;
-                Serial.println("SSID: [" + ssid + "]");
-            } else if (key == "password") {
-                password = value;
-            } else if (key == "channel") {
-                zelloChannel = value;
-                Serial.print("Channel from config: ");
-                Serial.println(zelloChannel);
-                printUtf8HexBytes(zelloChannel.c_str(), "Channel UTF-8 bytes");
-            } else if (key == "username") {
-                zelloUsername = value;
-            } else if (key == "password_zello") {
-                zelloPassword = value;
-            }
-        }
-    }
-    wifiFile.close();
-
-    File tokenFile = SPIFFS.open("/zello-api.key", "r");
-    if (!tokenFile) {
-        Serial.println("Failed to open zello-api.key");
-        return;
-    }
-    token = tokenFile.readString();
-    token.trim();
-    tokenFile.close();
-}
-
-void enhanceVoiceAudio(int16_t* buffer, int samples) {
-    // Skip if enhancement is disabled
-    if (!enhanceAudio) return;
-
-    static int16_t prevSample = 0;
-    static int16_t prevSamples[3] = {0, 0, 0};
-
-    switch (enhancementProfile) {
-        case 0: // No enhancement
-            return;
-        case 1: { // Voice profile - boost high frequencies for clarity
-            // Simple high-pass filter and treble boost for voice clarity
-            const float highBoost = 1.5f;  // High frequency boost factor
-            for (int i = 0; i < samples; i++) {
-                // Simple first-order high-pass filter
-                int16_t highpass = buffer[i] - prevSample;
-                prevSample = buffer[i];
-                // Mix original with high-pass filtered signal (boost high frequencies)
-                buffer[i] = constrain(buffer[i] + (int16_t)(highpass * highBoost), -32768, 32767);
-            }
-            break;
-        }
-        case 2: { // Music profile - gentle enhancement
-            // Simple presence boost (mid-high frequencies)
-            const float presenceBoost = 1.2f;
-            for (int i = 0; i < samples; i++) {
-                // Simple band-pass approximation
-                int16_t highMid = buffer[i] - ((prevSamples[0] + prevSamples[1] + prevSamples[2]) / 3);
-                // Update delay line
-                prevSamples[2] = prevSamples[1];
-                prevSamples[1] = prevSamples[0];
-                prevSamples[0] = buffer[i];
-                // Mix original with high-mid boosted signal
-                buffer[i] = constrain(buffer[i] + (int16_t)(highMid * presenceBoost), -32768, 32767);
-            }
-            break;
-        }
-    }
-}
-
-// Add this function before setup()
 bool connectWebSocket() {
     if (caCertificate.length() == 0) {
         // Only load the certificate from SPIFFS if we haven't already
@@ -387,6 +325,19 @@ bool connectWebSocket() {
     client.setCACert(caCertificate.c_str());
     Serial.println("CA certificate set for SSL connection");
 
+    // Add debug log to verify token validity
+    Serial.println("Checking token validity before WebSocket connection...");
+    if (token.isEmpty()) {
+        Serial.println("Token is empty. Attempting to refresh token...");
+        token = refreshZelloToken();
+        if (token.isEmpty()) {
+            Serial.println("Failed to refresh token. Cannot proceed with WebSocket connection.");
+            return false;
+        }
+    } else {
+        Serial.println("Token is valid. Proceeding with WebSocket connection.");
+    }
+
     bool connected = client.connect(websocket_server);
     if (!connected) {
         Serial.println("WebSocket connection failed!");
@@ -396,7 +347,41 @@ bool connectWebSocket() {
             Serial.println("ERROR: Certificate appears to be invalid. Check the format!");
         }
     }
-    return connected;
+
+    // Send logon message
+    char logon[1024];
+    sprintf(logon, "{\"command\": \"logon\",\"seq\": 1,\"auth_token\": \"%s\",\"username\": \"%s\",\"password\": \"%s\",\"channel\": \"%s\"}",
+            token.c_str(), zelloUsername.c_str(), zelloPassword.c_str(), zelloChannel.c_str());
+    client.send(logon);
+
+    // Check for authentication errors
+    unsigned long start = millis();
+    while (millis() - start < 5000) { // Wait up to 5 seconds for a response
+        client.poll();
+        if (client.available()) {
+            WebsocketsMessage message = client.readBlocking();
+            Serial.println("Server response: " + message.data());
+            if (message.data().indexOf("\"error\":") >= 0) {
+                Serial.println("Authentication failed. Refreshing token...");
+                token = refreshZelloToken();
+
+                // Save the new token
+                File tokenFile = SPIFFS.open("/zello-api.key", "w");
+                if (tokenFile) {
+                    tokenFile.print(token);
+                    tokenFile.close();
+                }
+
+                // Retry connection
+                client.close();
+                delay(100);
+                return connectWebSocket();
+            }
+            break;
+        }
+    }
+
+    return true;
 }
 
 void setup() {
@@ -533,6 +518,12 @@ void setup() {
     Serial.println("\nSetup complete");
 }
 
+// Define the monitorStackUsage function outside of the loop function
+void monitorStackUsage() {
+    UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(nullptr);
+    Serial.printf("[Stack Monitor] High Water Mark: %u bytes\n", highWaterMark);
+}
+
 void loop() {
     // Handle WebSocket messages and server
     if (client.available()) {
@@ -622,6 +613,44 @@ void loop() {
         isTransmitting = false;
     }
     lastPTTState = currentPTTState;
+
+    // Call stack monitoring in the loop function
+    // monitorStackUsage();
+}
+
+
+// Define the readCredentials function to load WiFi and token credentials
+void readCredentials() {
+    File wifiFile = SPIFFS.open("/wifi_credentials.ini", "r");
+    if (!wifiFile) {
+        Serial.println("Failed to open wifi_credentials.ini");
+        return;
+    }
+    while (wifiFile.available()) {
+        String line = wifiFile.readStringUntil('\n');
+        line.trim(); // Remove any leading/trailing whitespace, including \r and \n
+        int separatorIndex = line.indexOf('=');
+        if (separatorIndex != -1) {
+            String key = line.substring(0, separatorIndex);
+            String value = line.substring(separatorIndex + 1);
+            if (key == "ssid") {
+                ssid = value;
+                Serial.println("SSID: [" + ssid + "]");
+            } else if (key == "password") {
+                password = value;
+            }
+        }
+    }
+    wifiFile.close();
+
+    File tokenFile = SPIFFS.open("/zello-api.key", "r");
+    if (!tokenFile) {
+        Serial.println("Failed to open zello-api.key");
+        return;
+    }
+    token = tokenFile.readString();
+    token.trim(); // Remove any leading/trailing whitespace, including \r and \n
+    tokenFile.close();
 }
 
 bool initOpusDecoder(int sampleRate) {
@@ -1545,8 +1574,17 @@ void audioTxTask(void* parameter) {
     opus_encoder_ctl(opusEnc, OPUS_SET_BITRATE(16000)); // 16kbps, adjust as needed
 
     const int chunkSamples = 320; // 20ms at 16kHz
-    int16_t pcmBuffer[chunkSamples];
-    uint8_t opusBuffer[512];
+
+    // Move pcmBuffer and opusBuffer to heap to reduce stack usage
+    int16_t* pcmBuffer = (int16_t*)malloc(chunkSamples * sizeof(int16_t));
+    uint8_t* opusBuffer = (uint8_t*)malloc(512);
+    if (!pcmBuffer || !opusBuffer) {
+        Serial.println("Failed to allocate memory for buffers");
+        opus_encoder_destroy(opusEnc);
+        mic.end();
+        vTaskDelete(nullptr);
+        return;
+    }
 
     // Watchdog timer workaround: periodically yield to keep system alive
     unsigned long lastYield = millis();
@@ -1573,6 +1611,9 @@ void audioTxTask(void* parameter) {
 
     opus_encoder_destroy(opusEnc);
     mic.end();
+    // Free the buffers before deleting the task
+    free(pcmBuffer);
+    free(opusBuffer);
     vTaskDelete(nullptr);
 }
 
@@ -1591,7 +1632,7 @@ void startTransmission() {
         // Start TX task if not already running
         if (!txActive) {
             txActive = true;
-            xTaskCreatePinnedToCore(audioTxTask, "audioTxTask", 4096, nullptr, 1, &txTaskHandle, 1);
+            xTaskCreatePinnedToCore(audioTxTask, "audioTxTask", 8192, nullptr, 1, &txTaskHandle, 1);
         }
     } else {
         Serial.println("WebSocket not connected, cannot start transmission");
